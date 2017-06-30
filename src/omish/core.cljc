@@ -11,11 +11,11 @@
      (:require-macros
       [cljs.core.async.macros :as a])))
 
-(s/def ::mutate
+#_(s/def ::mutate
   (s/with-gen symbol?
     #(s/gen #{'sjp/add-foo 'sjp/add-derp})))
 
-(s/def :mutate/txs (s/coll-of ::mutate))
+#_(s/def :mutate/txs (s/coll-of ::mutate))
 
 (def state
   (atom {:sjps [[:sjp/by-id 0]
