@@ -5,8 +5,8 @@
  '[
    ;; Clojure stuff
    [org.clojure/clojure           "1.9.0-alpha17"]
-   [org.clojure/clojurescript     "1.9.562"]
-   [org.clojure/core.async        "0.3.442"]
+   [org.clojure/clojurescript     "1.9.671"]
+   [org.clojure/core.async        "0.3.443"]
    [org.clojure/test.check        "0.9.0"]
 
    ;; Boot setup
@@ -20,6 +20,8 @@
 
    ;; App dependencies
    [com.rpl/specter               "1.0.2"]
+   [rum                           "0.10.8"]
+   [org.martinklepsch/derivatives "0.2.0"]
    ])
 
 (load-data-readers!)
@@ -30,23 +32,16 @@
  '[adzerk.boot-reload :refer [reload]]
  '[pandeiro.boot-http :refer [serve]])
 
-(deftask build-dev
-  []
-  (comp
-   (notify :title "PAKSHET"
-           :visual true
-           :audible true)
-   (cljs :source-map true
-         :optimizations :none
-         ;; :compiler-options {:devcards true}
-         )))
-
 (deftask run-dev
   []
   (comp
    (watch)
    (reload)
+   (notify :title "PAKSHET"
+           :visual true
+           :audible true)
    (cljs-repl)
-   (build-dev)
+   (cljs :source-map true
+         :optimizations :none)
    (serve :reload true
           :port 9000)))
