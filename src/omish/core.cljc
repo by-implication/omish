@@ -1,126 +1,103 @@
 (ns omish.core
   (:refer-clojure :exclude [read])
   (:require
+   [com.rpl.specter :as sp]
    #?@(:clj [[clojure.core.async :as a]
              [clojure.spec.alpha :as s]
              [clojure.test.check.generators :as gen]]
        :cljs [[cljs.core.async :as a]
               [cljs.spec.alpha :as s]
-              [clojure.test.check.generators :as gen]]))
+              [clojure.test.check.generators :as gen]
+              [goog.object :as gobj]]))
   #?(:cljs
      (:require-macros
-      [cljs.core.async.macros :as a])))
+      [cljs.core.async.macros :as a]
+      [com.rpl.specter :as sp])))
 
-#_(s/def ::mutate
-  (s/with-gen symbol?
-    #(s/gen #{'sjp/add-foo 'sjp/add-derp})))
 
-#_(s/def :mutate/txs (s/coll-of ::mutate))
+#?(:cljs (enable-console-print!))
 
-(def state
-  (atom {:sjps [[:sjp/by-id 0]
-                [:sjp/by-id 1]] ;; a list of IDs
-         :selected-sjp nil ;; an ID
-         :sjp/by-id {0 {:foo nil
-                        :id 0}
-                     1 {:foo nil
-                        :id 1}}
-         :user/by-name {}}))
+
+(s/def :tx/params map?)
+
+
+(s/def :tx/mutate
+  (s/and list?
+         (s/cat :key symbol? :params (s/? :tx/params))))
+
+
+;; Try not to get carried away and implement om.next/datomic's query syntax
+(s/def :tx/read
+  (s/cat :key keyword? :params (s/? :tx/params)))
+
+
+(s/def ::tx
+  (s/or :mutate :tx/mutate
+        :read :tx/read))
+
+
+(s/def ::txs
+  (s/coll-of ::tx
+             :kind vector?
+             :into []))
+
+
+(s/def ::local-muts
+  (s/coll-of fn?))
 
 
 (defn merge!
   [{:keys [state merge-tree] :as env} novelty]
   (swap! state merge-tree novelty))
 
-(defmulti read (fn [_ k _] k))
-
-(defmethod read :default
-  [{:keys [state]} k _]
-  (let [st @state]
-    {:value (get st k)}))
-
-(defmethod read :sjps
-  [{:keys [state]} k _]
-  (let [st @state
-        sjp-idents (get st k)]
-    {:value (if (some? sjp-idents)
-              (mapv
-               (fn [sjp-ident]
-                 ;; sjp-ident [:sjp/by-id 0]
-                 (get-in st sjp-ident))
-               sjp-idents)
-              "Loading SJPs")
-     :remote (nil? sjp-idents)}))
-
-(defmulti mutate (fn [_ k _] k))
-
-(defmethod mutate 'sjp/add-foo
-  [{:keys [state]} _ {:keys [sjp/id] :as params}]
-  (let [st @state]
-    {:local (fn [] (swap! state assoc-in
-                          [:sjp/by-id id :foo]
-                          "bar"))
-     :remote params}))
-
-(defmethod mutate 'sjp/add-derp
-  [_ _ _]
-  {:local identity
-   :remote nil})
 
 (defn make-parser
   "Creates a parser that, when called, will appropriately respond to events"
-  [{:keys [mutate read]} remote-fn]
+  [{:keys [mutate read mutate-local-key read-value-key]
+    ;; defaults
+    :or   {mutate-local-key :local
+           read-value-key   :value}}]
   (fn parser-fn
-    ([env txs]
-     (parser-fn env txs false))
-    ([{:keys [state] :as env} txs enable-remote?]
-     ;; fucking doseq will return nil
-     (doseq [[tx-key tx-params] txs]
-       (cond
-         (keyword? tx-key) (let [{:keys [value remote]} (read env tx-key tx-params)]
-                             (println "hello?" value)
-                             (when (and remote enable-remote?)
-                               (remote-fn env tx-key tx-params))
-                             value)
-         (symbol? tx-key)  (let [{:keys [local remote]} (mutate env tx-key tx-params)]
-                             (println @state)
-                             (local)
-                             (println @state)
-                             (when (and remote enable-remote?)
-                               (remote-fn [tx-key tx-params]
-                                          (fn cb [novelty]
-                                            (merge! state novelty)
-                                            (parser-fn env [tx-key tx-params])))
-                               #_(remote-fn env tx-key tx-params)))
-         :else             (throw (str "tx-key is an invalid data type" tx-key)))
-       ))))
-
-(defmulti remote-fn (fn [[k _] _] k))
-
-(defmethod remote-fn :sjps
-  [[_ params] cb]
-  (println "sjps")
-  
-  )
-
-(defmethod remote-fn 'sjp/add-foo
-  [[_ params] cb]
-  (println "fooooo")
-  (cb {:sjps [[:sjp/by-id 0]]
-       :sjp/by-id {0 {:hi 1}}}))
-#_(defn remote-fn
-  [key params]
-  (case key
-    :foo->7 (a/go
-              (a/<! (a/timeout 1000))
-              (println "supplies!" params))
-    :bar->5 (a/go
-              (a/<! (a/timeout 1000))
-              (println "shiznit" params))))
-
-
-(def parser (make-parser {:mutate mutate
-                          :read read} remote-fn))
+    ([env txs] (parser-fn env txs false))
+    ([{:keys [state remote-fn remote-keys merge!] :or {remote-keys [:remote]} :as env}
+      txs
+      enable-remote?]
+     (let [remote-cb     (fn [novelty] (merge! state novelty))
+           conformed-txs (s/conform ::txs txs)
+           readmutate    {:read read :mutate mutate}
+           parseds       (mapv
+                          (fn [[method {:keys [key params] :as data}]]
+                            (assoc data :parsed ((readmutate method) env key params)))
+                          conformed-txs)
+           local-muts    (into []
+                               (comp (map (comp mutate-local-key :parsed))
+                                     (remove nil?))
+                               parseds)
+           _             (assert (s/valid? ::local-muts local-muts)
+                                 (s/explain ::local-muts local-muts))
+           values        (reduce
+                          (fn [acc {:keys [key params parsed]}]
+                            (if-let [value (get parsed read-value-key)]
+                              (assoc acc key value)
+                              acc))
+                          {}
+                          parseds)
+           remotes       (reduce
+                          (fn [acc remote-key]
+                            (if-let [txs-with-remote (->> parseds
+                                                          (filterv
+                                                           (fn [parsed]
+                                                             (contains? parsed remote-key)))
+                                                          seq)]
+                              (assoc acc remote-key txs-with-remote)
+                              acc))
+                          {}
+                          remote-keys)]
+       (doseq [local-mut local-muts]
+         (local-mut))
+       (when (seq remotes)
+         (remote-fn remotes remote-cb))
+       values))))
 
 
 (defn dispatch!
@@ -141,8 +118,61 @@
     new))
 
 
-(def env
-  {:state state
-   :parser parser
-   :merge-tree merge-tree
-   :merge! merge!})
+(def derivatives-child-context-types
+  "Child Context Types of Martin Klepsch's Derivatives
+   for merging with our own stuff because things get overridden.
+   Ditto for pushy history"
+  #?(:cljs
+     {"org.martinklepsch.derivatives/get"
+      js/React.PropTypes.func
+      "org.martinklepsch.derivatives/release"
+      js/React.PropTypes.func
+      "pushy/history"
+      js/React.PropTypes.object}))
+
+
+(defn rum-omish-env
+  "Returns a Rum mixin for associating
+   an event channel to child context.
+   Properly mounts and unmounts itself.
+
+   Takes a mutation function which transforms state.
+   State is the db atom itself, and the mutate functions
+   can decide whether or not to modify the app state.
+
+   Optionally takes an environment map.
+   Required keys are: event-chan, mutate, and state."
+  [env]
+  ;; because we're passing the environment down to children
+  ;; consider removing the :state.
+  ;; Also, for convenience, add a :dispatch key with the event-chan closed over.
+  #?(:cljs
+     {:will-mount       (fn [state]
+                          (assoc state :env env))
+      :will-unmount     (fn [state]
+                          (dissoc state :env))
+      :class-properties {:childContextTypes (assoc derivatives-child-context-types
+                                                   "omish/env"
+                                                   js/React.PropTypes.object)}
+      :child-context    (fn [_] {"omish/env" env})}))
+
+
+(defn rum-omish-sub
+  ([]
+   (rum-omish-sub nil))
+  ([will-unmount]
+   #?(:cljs
+      {:class-properties {:contextTypes (assoc derivatives-child-context-types
+                                               "omish/env"
+                                               js/React.PropTypes.object)}
+       :will-mount       (fn [state]
+                           (let [env (-> state
+                                         :rum/react-component
+                                         (gobj/get "context")
+                                         (gobj/get "omish/env"))]
+                             (assert env "No omish env found in component context.")
+                             ;; should probably change implementation again to avoid js->clj
+                             (assoc state :omish/env (js->clj env :keywordize-keys true))))
+       :will-unmount     (fn [state]
+                           (-> (will-unmount state)
+                               (dissoc :omish/env)))})))

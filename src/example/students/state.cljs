@@ -4,5 +4,5 @@
   [state]
   {
    :db [[] state]
-   :route [[:db] (fn [db] (:route db))]
+   :app/students [[:db] (fn [db] (:app/students db))]
    })
