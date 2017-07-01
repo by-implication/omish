@@ -59,24 +59,24 @@
            read-value-key   :value}}]
   (fn parser-fn
     ([env txs] (parser-fn env txs false))
-    ([{:keys [state remote-fn remote-keys merge!] :or {remote-keys [:remote]} :as env}
+    ([{:keys [state remote-fn remote-keys merge! merge-tree] :or {remote-keys [:remote]} :as env}
       txs
       enable-remote?]
-     (let [remote-cb     (fn [novelty] (merge! state novelty))
+     (let [remote-cb     (partial merge! env)
            conformed-txs (s/conform ::txs txs)
            readmutate    {:read read :mutate mutate}
            parseds       (mapv
-                          (fn [[method {:keys [key params] :as data}]]
-                            (assoc data :parsed ((readmutate method) env key params)))
+                          (fn [[method {:keys [key params] :as expanded-tx}]]
+                            [expanded-tx ((readmutate method) env key params)])
                           conformed-txs)
            local-muts    (into []
-                               (comp (map (comp mutate-local-key :parsed))
+                               (comp (map (comp mutate-local-key second))
                                      (remove nil?))
                                parseds)
            _             (assert (s/valid? ::local-muts local-muts)
                                  (s/explain ::local-muts local-muts))
            values        (reduce
-                          (fn [acc {:keys [key params parsed]}]
+                          (fn [acc [expanded-tx parsed]]
                             (if-let [value (get parsed read-value-key)]
                               (assoc acc key value)
                               acc))
@@ -84,13 +84,15 @@
                           parseds)
            remotes       (reduce
                           (fn [acc remote-key]
-                            (if-let [txs-with-remote (->> parseds
-                                                          (filterv
-                                                           (fn [parsed]
-                                                             (contains? parsed remote-key)))
-                                                          seq)]
-                              (assoc acc remote-key txs-with-remote)
-                              acc))
+                            (let [txs-with-remote (into []
+                                                        (comp (filter
+                                                               (fn [[expanded-tx parsed]]
+                                                                 (contains? parsed remote-key)))
+                                                              (map first))
+                                                        parseds)]
+                              (if (seq txs-with-remote)
+                                (assoc acc remote-key (vec txs-with-remote))
+                                acc)))
                           {}
                           remote-keys)]
        (doseq [local-mut local-muts]
