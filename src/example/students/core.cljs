@@ -9,7 +9,9 @@
    [rum.core :as rum]))
 
 
-(def state (atom {:app/students [{:student/id 0}]}))
+(def state (atom {:app/students [[:student/by-id 0]]
+                  :student/by-id {0 {:student/id 0
+                                     :student/name "John"}}}))
 
 
 (def parser (omish/make-parser {:mutate mutate}))
@@ -44,3 +46,6 @@
 
 (defn run []
   (rum/mount (app) (js/document.getElementById "app")))
+
+
+(run)

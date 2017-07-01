@@ -176,5 +176,5 @@
                              ;; should probably change implementation again to avoid js->clj
                              (assoc state :omish/env (js->clj env :keywordize-keys true))))
        :will-unmount     (fn [state]
-                           (-> (will-unmount state)
+                           (-> ((or will-unmount identity) state)
                                (dissoc :omish/env)))})))

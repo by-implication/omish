@@ -10,8 +10,13 @@
   [_ cb]
   (go
     (<! (timeout 1000))
-    (cb {:app/students [{:student/id 1}
-                        {:student/id 0}]})))
+    (cb {:app/students [[:student/by-id 0]
+                        [:student/by-id 1]]
+         :student/by-id {0 {:student/id 0
+                            :student/name "John"}
+                         1 {:student/id 1
+                            :student/name "Sally"}}})))
+
 
 (defn remote-fn
   [{:keys [remote]} cb]

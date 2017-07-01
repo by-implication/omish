@@ -4,5 +4,6 @@
   [state]
   {
    :db [[] state]
-   :app/students [[:db] (fn [db] (:app/students db))]
+   :app/students [[:db] (fn [db] (mapv (partial get-in db)
+                                       (:app/students db)))]
    })
