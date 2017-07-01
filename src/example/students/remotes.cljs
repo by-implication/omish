@@ -9,7 +9,7 @@
 (defmethod http-fn 'students/get
   [_ cb]
   (go
-    (<! (timeout 400))
+    (<! (timeout 1000))
     (cb {:app/students [{:student/id 1}
                         {:student/id 0}]})))
 
