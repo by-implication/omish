@@ -31,7 +31,7 @@
   (omish/rum-omish-sub)
   {:did-mount (fn [state]
                 (let [{:keys [omish/env]} state]
-                  (omish/dispatch! env `[(students/get)]))
+                  (omish/transact! env `[(students/get)]))
                 state)}
   [s]
   [:div (str (d/react s :app/students))])

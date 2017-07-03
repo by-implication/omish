@@ -1,12 +1,16 @@
 (ns omish.core
+  "An attempt to replicate om.next functionality without
+  Ident, IQuery, and reads."
   (:refer-clojure :exclude [read])
   (:require
    [com.rpl.specter :as sp]
    #?@(:clj [[clojure.core.async :as a]
              [clojure.spec.alpha :as s]
+             [clojure.spec.test.alpha :as stest]
              [clojure.test.check.generators :as gen]]
        :cljs [[cljs.core.async :as a]
               [cljs.spec.alpha :as s]
+              [cljs.spec.test.alpha :as stest]
               [clojure.test.check.generators :as gen]
               [goog.object :as gobj]]))
   #?(:cljs
@@ -18,32 +22,58 @@
 #?(:cljs (enable-console-print!))
 
 
-(s/def :tx/params map?)
+;; Because we want to potentially support anything that could be a valid
+;; defmulti dispatch value.
+(s/def :query/key some?)
 
 
-(s/def :tx/mutate
-  (s/and list?
-         (s/cat :key symbol? :params (s/? :tx/params))))
+(s/def :query/params map?)
 
 
-;; Try not to get carried away and implement om.next/datomic's query syntax
-(s/def :tx/read
-  (s/cat :key keyword? :params (s/? :tx/params)))
+;; Note: all queries are mutates.
+(s/def ::query
+  (s/cat :key :query/key :params (s/? :query/params)))
 
 
 (s/def ::tx
-  (s/or :mutate :tx/mutate
-        :read :tx/read))
-
-
-(s/def ::txs
-  (s/coll-of ::tx
+  (s/coll-of ::query
              :kind vector?
              :into []))
 
 
 (s/def ::local-muts
   (s/coll-of fn?))
+
+
+(s/def ::env
+  (s/keys :req-un [::state
+                   ::parser]
+          :opt-un [::merge!
+                   ::merge-tree
+                   ::remote-fn
+                   ::remote-keys]))
+
+
+(s/def ::parser-config
+  (s/keys :opt-un [::mutate ::mutate-local-key]))
+
+
+(s/fdef make-parser
+        :args (s/cat :parser-config ::parser-config)
+        :ret (s/fspec :args (s/cat :env ::env
+                                   :txs ::txs
+                                   :enable-remote? (s/? #{true false}))
+                      :ret (s/nilable map?)))
+
+
+(s/fdef merge-tree
+        :args (s/cat :old some? :new some?)
+        :ret some?)
+
+
+(s/fdef merge!
+        :args (s/cat :env ::env :novelty some?)
+        :ret some?)
 
 
 (defn merge!
@@ -53,59 +83,54 @@
 
 (defn make-parser
   "Creates a parser that, when called, will appropriately respond to events"
-  [{:keys [mutate read mutate-local-key read-value-key]
-    ;; defaults
-    :or   {mutate-local-key :local
-           read-value-key   :value}}]
+  [{:keys [mutate mutate-local-key] :or {mutate-local-key :local}}]
   (fn parser-fn
-    ([env txs] (parser-fn env txs false))
-    ([{:keys [state remote-fn remote-keys merge! merge-tree] :or {remote-keys [:remote]} :as env}
-      txs
-      enable-remote?]
-     (let [remote-cb     (partial merge! env)
-           conformed-txs (s/conform ::txs txs)
-           readmutate    {:read read :mutate mutate}
-           parseds       (mapv
-                          (fn [[method {:keys [key params] :as expanded-tx}]]
-                            [expanded-tx ((readmutate method) env key params)])
-                          conformed-txs)
-           local-muts    (into []
-                               (comp (map (comp mutate-local-key second))
-                                     (remove nil?))
-                               parseds)
-           _             (assert (s/valid? ::local-muts local-muts)
-                                 (s/explain ::local-muts local-muts))
-           values        (reduce
-                          (fn [acc [expanded-tx parsed]]
-                            (if-let [value (get parsed read-value-key)]
-                              (assoc acc key value)
-                              acc))
-                          {}
-                          parseds)
-           remotes       (reduce
-                          (fn [acc remote-key]
-                            (let [txs-with-remote (into []
-                                                        (comp (filter
-                                                               (fn [[expanded-tx parsed]]
-                                                                 (contains? parsed remote-key)))
-                                                              (map first))
-                                                        parseds)]
-                              (if (seq txs-with-remote)
-                                (assoc acc remote-key (vec txs-with-remote))
-                                acc)))
-                          {}
-                          remote-keys)]
-       (doseq [local-mut local-muts]
-         (local-mut))
-       (when (seq remotes)
-         (remote-fn remotes remote-cb))
-       values))))
+    ([env tx] (parser-fn env tx nil))
+    ;; When remote-key is specified, should return the remote
+    ([{:keys [state] :as env}
+      tx
+      remote-key]
+     (let [remote-cb    (partial merge! env)
+           conformed-tx (s/conform ::tx tx)
+           xq->parsed   (fn [{:keys [key params] :as xq}]
+                          (mutate env key params))]
+       (if (some? remote-key)
+         (mapv (fn [xq]
+                 (let [parsed (xq->parsed xq)
+                       remote (get parsed remote-key)]
+                   (if (true? remote)
+                     xq
+                     remote)))
+               conformed-tx)
+         (let [local-mutates (mapv (comp mutate-local-key
+                                         xq->parsed)
+                                   conformed-tx)]
+           (doseq [local-mutate local-mutates]
+             (local-mutate))
+           @state))))))
 
 
-(defn dispatch!
+(defn gather-remotes
+  [{:keys [parser] :as env} tx remote-keys]
+  (into {}
+        (comp
+         ;; Run the parser given the query, and passing the remote
+         (map #(vector % (parser env tx %)))
+         ;; But only if there are entries for that remote.
+         (filter (fn [[_ v]] (pos? (count v)))))
+        remote-keys))
+
+
+(defn transact!
   "Equivalent to calling the parser but allowing remotes to happen"
-  [{:keys [parser] :as env} txs]
-  (parser env txs true))
+  [{:keys [parser remote-keys remote-fn merge!] :or {remote-keys [:remote]} :as env} tx]
+  (let [res             (parser env tx)
+        pending-remotes (gather-remotes env tx remote-keys)
+        remote-cb       (partial merge! env)]
+    (when (seq pending-remotes)
+      #?(:cljs (js/console.log pending-remotes))
+      (remote-fn pending-remotes remote-cb))
+    res))
 
 
 (defn merge-tree
@@ -135,15 +160,10 @@
 
 (defn rum-omish-env
   "Returns a Rum mixin for associating
-   an event channel to child context.
-   Properly mounts and unmounts itself.
+  the omish environment to child context.
 
-   Takes a mutation function which transforms state.
-   State is the db atom itself, and the mutate functions
-   can decide whether or not to modify the app state.
-
-   Optionally takes an environment map.
-   Required keys are: event-chan, mutate, and state."
+  Merges derivatives child context types because
+  Rum naively merges class-properties."
   [env]
   ;; because we're passing the environment down to children
   ;; consider removing the :state.
@@ -153,13 +173,20 @@
                           (assoc state :env env))
       :will-unmount     (fn [state]
                           (dissoc state :env))
-      :class-properties {:childContextTypes (assoc derivatives-child-context-types
-                                                   "omish/env"
-                                                   js/React.PropTypes.object)}
+      :class-properties {:childContextTypes
+                         (assoc derivatives-child-context-types
+                                "omish/env"
+                                js/React.PropTypes.object)}
       :child-context    (fn [_] {"omish/env" env})}))
 
 
 (defn rum-omish-sub
+  "Returns a Rum mixin for associating
+  the omish environment to local component state
+  from the child context.
+
+  Merges derivatives child context types because
+  Rum naively merges class-properties."
   ([]
    (rum-omish-sub nil))
   ([will-unmount]
