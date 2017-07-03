@@ -35,6 +35,11 @@
   (s/cat :key :query/key :params (s/? :query/params)))
 
 
+(s/def ::conformed-query
+  (s/keys :req-un [:query/key]
+          :opt-un [:query/params]))
+
+
 (s/def ::tx
   (s/coll-of ::query
              :kind vector?
@@ -43,6 +48,14 @@
 
 (s/def ::local-muts
   (s/coll-of fn?))
+
+
+(s/def ::remote-key keyword?)
+
+
+(s/def ::remote-keys (s/coll-of ::remote-key
+                                :kind vector?
+                                :into []))
 
 
 (s/def ::env
@@ -55,15 +68,20 @@
 
 
 (s/def ::parser-config
-  (s/keys :opt-un [::mutate ::mutate-local-key]))
+  (s/keys :req-un [::mutate]
+          :opt-un [::mutate-local-key]))
+
+
+
 
 
 (s/fdef make-parser
         :args (s/cat :parser-config ::parser-config)
         :ret (s/fspec :args (s/cat :env ::env
-                                   :txs ::txs
-                                   :enable-remote? (s/? #{true false}))
-                      :ret (s/nilable map?)))
+                                   :tx ::tx
+                                   :remote-key ::remote-key)
+                      :ret (s/or :local map?
+                                 :remote (s/coll-of ::conformed-query))))
 
 
 (s/fdef merge-tree
@@ -87,14 +105,13 @@
   (fn parser-fn
     ([env tx] (parser-fn env tx nil))
     ;; When remote-key is specified, should return the remote
-    ([{:keys [state] :as env}
-      tx
-      remote-key]
+    ([{:keys [state] :as env} tx remote-key]
      (let [remote-cb    (partial merge! env)
            conformed-tx (s/conform ::tx tx)
            xq->parsed   (fn [{:keys [key params] :as xq}]
                           (mutate env key params))]
        (if (some? remote-key)
+         ;; doesn't apply local mutations
          (mapv (fn [xq]
                  (let [parsed (xq->parsed xq)
                        remote (get parsed remote-key)]
@@ -102,6 +119,8 @@
                      xq
                      remote)))
                conformed-tx)
+         ;; applies local mutations but does not return
+         ;; remote information
          (let [local-mutates (mapv (comp mutate-local-key
                                          xq->parsed)
                                    conformed-tx)]

@@ -6,4 +6,7 @@
 (defmethod mutate 'students/get
   [_ _ _]
   {:local identity
-   :remote true})
+   :remote true
+   :some-other-server true
+   :blah {:circus "lion"
+          :name "greymane"}})
