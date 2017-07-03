@@ -46,7 +46,7 @@
              :into []))
 
 
-(s/def ::local-muts
+(s/def ::local-mutates
   (s/coll-of fn?))
 
 
@@ -124,6 +124,8 @@
          (let [local-mutates (mapv (comp mutate-local-key
                                          xq->parsed)
                                    conformed-tx)]
+           (assert (s/valid? ::local-mutates local-mutates)
+                   (s/explain ::local-mutates local-mutates))
            (doseq [local-mutate local-mutates]
              (local-mutate))
            @state))))))
@@ -147,7 +149,7 @@
         pending-remotes (gather-remotes env tx remote-keys)
         remote-cb       (partial merge! env)]
     (when (seq pending-remotes)
-      #?(:cljs (js/console.log pending-remotes))
+      ;; #?(:cljs (js/console.log pending-remotes))
       (remote-fn pending-remotes remote-cb))
     res))
 

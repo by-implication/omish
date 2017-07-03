@@ -22,19 +22,25 @@
    :parser parser
    :merge-tree omish/merge-tree
    :merge! omish/merge!
-   :remote-fn remotes/remote-fn})
+   :remote-fn remotes/remote-fn
+   ;; :remote-keys [:remote]
+   })
 
 
 (rum/defcs students-list <
   rum/reactive
-  (d/drv :app/students)
+  (d/drv :app/students :students/loading)
   (omish/rum-omish-sub)
   {:did-mount (fn [state]
                 (let [{:keys [omish/env]} state]
                   (omish/transact! env `[(students/get)]))
                 state)}
   [s]
-  [:div (str (d/react s :app/students))])
+  [:div
+   [:div (when (d/react s :students/loading)
+           "Loading students")]
+   [:div
+    (str (d/react s :app/students))]])
 
 
 (rum/defc app <
